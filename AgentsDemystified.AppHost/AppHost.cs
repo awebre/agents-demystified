@@ -5,8 +5,14 @@ var ollama = builder.AddOllama("ollama")
 
 var phi3 = ollama.AddModel("phi3", "phi3");
 
-builder.AddProject<Projects.AgentsDemystified_Console>("console")
+var server = builder.AddProject<Projects.AgentsDemystified_Server>("server")
     .WithReference(phi3)
-    .WaitFor(phi3);
+    .WaitFor(phi3)
+    .WithHttpHealthCheck("/health")
+    .WithExternalHttpEndpoints();
+
+builder.AddViteApp("webfrontend", "../frontend")
+    .WithReference(server)
+    .WaitFor(server);
 
 builder.Build().Run();

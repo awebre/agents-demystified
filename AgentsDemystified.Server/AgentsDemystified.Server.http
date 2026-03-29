@@ -1,0 +1,6 @@
+@AgentsDemystified.Server_HostAddress = http://localhost:5192
+
+GET {{AgentsDemystified.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
