@@ -98,11 +98,17 @@ Replace the entire contents of App.tsx with the token prediction UI.
 ```
 App
 ├── Header ("Agents Demystified — Next Token Prediction")
-├── PromptInput (textarea + submit button)
-└── ResultsPanel
-    ├── PredictedToken (highlighted display of the chosen token)
-    └── CandidateList (ranked bar chart of top N candidates)
+├── PromptInput (textarea, no button — predictions fire automatically)
+└── CandidateList (ranked bar chart of top N candidates, shown below textarea like an autocomplete dropdown)
 ```
+
+#### Behavior
+
+- **No button.** Predictions fire automatically as the user types.
+- Debounce the API call by 300ms so it doesn't fire on every keystroke.
+- While a prediction is loading, show a subtle loading indicator (e.g. a small spinner or "predicting..." text near the candidate list, NOT a disabled button).
+- If the prompt is empty or whitespace-only, clear the results and don't call the API.
+- Use `AbortController` to cancel in-flight requests when the user types again before the previous request completes.
 
 #### State
 
@@ -124,33 +130,75 @@ const [result, setResult] = useState<PredictResponse | null>(null);
 const [loading, setLoading] = useState(false);
 ```
 
-#### API Call
+#### Debounced API Call
+
+Use a `useEffect` that watches `prompt` and debounces the fetch by 300ms. Cancel previous in-flight requests with `AbortController`.
 
 ```typescript
-const handlePredict = async () => {
-  setLoading(true);
-  try {
-    const response = await fetch("/api/predict", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, topN: 10 }),
-    });
-    const data: PredictResponse = await response.json();
-    setResult(data);
-  } finally {
-    setLoading(false);
+useEffect(() => {
+  if (!prompt.trim()) {
+    setResult(null);
+    return;
   }
-};
+
+  const controller = new AbortController();
+  const timeout = setTimeout(async () => {
+    setLoading(true);
+    try {
+      const response = await fetch("/api/predict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, topN: 10 }),
+        signal: controller.signal,
+      });
+      const data: PredictResponse = await response.json();
+      setResult(data);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+    } finally {
+      setLoading(false);
+    }
+  }, 300);
+
+  return () => {
+    clearTimeout(timeout);
+    controller.abort();
+  };
+}, [prompt]);
 ```
 
 #### Results Display
 
+Show the candidate list directly below the textarea, like an autocomplete suggestion list.
+
 For each candidate in `result.candidates`:
 
-- Show the token text
+- Show the token text, but **replace invisible whitespace characters with visible symbols** so they're not blank:
+  - Space `" "` → `"␣"`
+  - Newline `"\n"` → `"↵"`
+  - Tab `"\t"` → `"⇥"`
+  - Carriage return `"\r"` → `"⏎"`
+  - If the token is entirely whitespace but doesn't match the above, show it as a JS-style escape (e.g. `"\\n"`)
+  - Use a helper function like:
+    ```typescript
+    function displayToken(token: string): string {
+      return token
+        .replace(/ /g, "␣")
+        .replace(/\n/g, "↵")
+        .replace(/\t/g, "⇥")
+        .replace(/\r/g, "⏎");
+    }
+    ```
+  - Render the display token text inside the candidate row, NOT the raw token
 - Show probability as a percentage: `(candidate.probability * 100).toFixed(1) + "%"`
 - Render a horizontal bar with width proportional to probability relative to the top candidate: `width: (candidate.probability / result.candidates[0].probability * 100) + "%"`
 - Highlight the first candidate (the predicted token) with a distinct background color
+
+When `loading` is true and there are no results yet, show "Predicting..." below the textarea.
+
+#### Clicking a Candidate
+
+When the user clicks a candidate row, append the **raw token** (not the display-escaped version) to the current prompt. This simulates selecting an autocomplete suggestion. After appending, the debounced prediction will automatically fire again for the new prompt, creating a fluid "keep picking the next token" experience.
 
 #### Styling
 
@@ -158,7 +206,7 @@ Use inline styles or a simple CSS approach. The UI should be minimal and readabl
 
 - Dark or light background, monospace font for tokens
 - Bars in a color like `#3b82f6` (blue)
-- Predicted token displayed large above the candidate list
+- Candidate list positioned directly below the textarea like an autocomplete dropdown
 - Prompt textarea should be wide (100%) and ~3 rows tall
 
 ### File: `frontend/src/App.css`
@@ -173,7 +221,8 @@ Replace with minimal styles for the prediction UI. Keep it simple — the focus 
 2. Run `aspire start` — all resources (ollama, phi3, server, webfrontend) reach Running/Healthy
 3. Open the frontend URL from the Aspire dashboard
 4. The default prompt "The capital of France is" should be pre-filled
-5. Click "Predict Next Token"
+5. Candidate list should appear automatically (no button click needed)
 6. Results should show "Paris" (or similar) as the top candidate with high probability
 7. Other candidates should appear with lower probabilities and shorter bars
-8. Verify endpoint appears in Scalar API docs at `/scalar/v1`
+8. Editing the prompt should trigger a new prediction after a short debounce delay
+9. Verify endpoint appears in Scalar API docs at `/scalar/v1`
