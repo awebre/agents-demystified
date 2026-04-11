@@ -2,9 +2,13 @@
 
 ## Goal
 
-Add a streaming `POST /api/generate` endpoint and a generation UI that shows text building up token-by-token. The server runs a prediction loop — repeatedly predicting the next token and selecting the top result — until a stop token is detected. Each step's token and candidates are streamed to the client.
+Add a streaming `POST /api/generate` endpoint and a generation UI that shows text building up token-by-token. The server runs a prediction loop — repeatedly predicting the next token and selecting the top result — until a stop token (like `<|endoftext|>`) is detected. Each step's token and candidates are streamed to the client, including the final EOS token so the audience can see exactly why generation stopped.
 
 The key conceptual point: **generation is just Phase 1 (single token prediction) run in a loop.** The spec reflects this by first refactoring Phase 1's prediction logic into a server-side abstraction, then building Phase 2 as a loop over that same abstraction.
+
+### Important: Ollama EOS Token Behavior
+
+Ollama suppresses special tokens (e.g., `<|endoftext|>`) in the `Response` field, returning an empty string. However, the actual token **is** present in the logprobs. The `TokenPredictor` must detect this case and recover the real token from the top logprob candidate. Stop detection (`Done`) is based on whether the token is a special token (matches `<...>` pattern) or empty — **not** on Ollama's `Done` flag, which is always `true` for `NumPredict = 1` requests.
 
 **Prerequisite:** Phase 1 is already implemented. The `/api/predict` endpoint and token prediction UI exist.
 
@@ -56,11 +60,24 @@ public class TokenPredictor(IOllamaApiClient client)
         }
 
         var candidates = ExtractCandidates(lastResponse);
+        var token = lastResponse?.Response ?? "";
+
+        // IMPORTANT: Ollama suppresses special tokens (like <|endoftext|>) in the
+        // Response field, returning "". When that happens, grab the actual token
+        // from the top logprob candidate so the frontend can display what the model
+        // really predicted.
+        if (string.IsNullOrEmpty(token) && candidates.Count > 0)
+            token = candidates[0].Token;
+
+        var isEos = string.IsNullOrEmpty(token.Trim()) || IsSpecialToken(token.Trim());
         return new TokenPredictionResult(
-            lastResponse?.Response?.Trim() ?? "",
+            token,
             candidates,
-            lastResponse?.Done ?? true);
+            isEos);
     }
+
+    private static bool IsSpecialToken(string token) =>
+        token.StartsWith('<') && token.EndsWith('>');
 
     private static List<TokenCandidate> ExtractCandidates(GenerateResponseStream? response)
     {
@@ -335,6 +352,27 @@ GenerationLoopView
 - Each token span is clickable — clicking it sets `selectedStep` to that token's index
 - The currently selected token span gets a highlighted background
 - Render raw tokens in the text flow (don't replace spaces with ␣ in the flowing text — only use the display symbols in the CandidateList)
+- **EOS token:** When `event.done` is true, render the token text (e.g., `<|endoftext|>`) with a distinct `.eos-token` style — red text, light red background, small pill badge. If the token is somehow empty, show `⏹` as a fallback. This is clickable like any other token to inspect its candidates.
+
+**Token span rendering (exact JSX):**
+
+```tsx
+{generatedTokens.map((gt, index) => (
+  <span
+    key={index}
+    className={
+      "generated-token-span" +
+      (selectedStep === index ? " selected-token" : "") +
+      (gt.done ? " eos-token" : "")
+    }
+    onClick={() =>
+      setSelectedStep(selectedStep === index ? null : index)
+    }
+  >
+    {gt.done ? gt.token || "⏹" : gt.token}
+  </span>
+))}
+```
 
 **StepCandidates panel:**
 - Shown below the generated text when a token is selected (`selectedStep !== null`)
@@ -351,6 +389,7 @@ Add styles for the new elements to `App.css`:
 - Tab bar: horizontal flex, each tab is a clickable element, active tab has a bottom border or background highlight
 - Generated text: displayed in a monospace block with `white-space: pre-wrap`
 - Token spans: inline, with a subtle hover effect and a highlighted state when selected
+- `.eos-token`: red text (`#ef4444`), light red background (`#fef2f2`), red border (`#fecaca`), smaller font size (`0.75rem`), bold, small pill shape with padding and border-radius. Hover darkens the background.
 - Step candidates panel: reuses the same `.candidate-list` styles from the shared `CandidateList`
 
 ### File: `frontend/src/App.css`
