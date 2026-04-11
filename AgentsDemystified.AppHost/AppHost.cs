@@ -11,8 +11,12 @@ var server = builder.AddProject<Projects.AgentsDemystified_Server>("server")
     .WithHttpHealthCheck("/health")
     .WithExternalHttpEndpoints();
 
-builder.AddViteApp("webfrontend", "../frontend")
+var frontend = builder.AddViteApp("webfrontend", "../frontend")
     .WithReference(server)
     .WaitFor(server);
+
+builder.AddDevTunnel("demo-tunnel")
+    .WithReference(frontend)
+    .WithAnonymousAccess();
 
 builder.Build().Run();

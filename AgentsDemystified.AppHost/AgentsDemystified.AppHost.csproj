@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.DevTunnels" Version="13.2.2" />
     <PackageReference Include="Aspire.Hosting.JavaScript" Version="13.2.0" />
     <PackageReference Include="CommunityToolkit.Aspire.Hosting.Ollama" Version="13.2.1-beta.532" />
   </ItemGroup>
