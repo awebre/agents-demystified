@@ -6,9 +6,17 @@ Add a streaming `POST /api/generate` endpoint and a generation UI that shows tex
 
 The key conceptual point: **generation is just Phase 1 (single token prediction) run in a loop.** The spec reflects this by first refactoring Phase 1's prediction logic into a server-side abstraction, then building Phase 2 as a loop over that same abstraction.
 
-### Important: Ollama EOS Token Behavior
+### Important: Token Selection and EOS Detection
 
-Ollama suppresses special tokens (e.g., `<|endoftext|>`) in the `Response` field, returning an empty string. However, the actual token **is** present in the logprobs. The `TokenPredictor` must detect this case and recover the real token from the top logprob candidate. Stop detection (`Done`) is based on whether the token is a special token (matches `<...>` pattern) or empty — **not** on Ollama's `Done` flag, which is always `true` for `NumPredict = 1` requests.
+We do **not** use Ollama's `Response` field to determine the chosen token. Instead, we always pick the token ourselves from the logprob candidates. This gives us control over sampling (greedy vs temperature-based) and avoids several Ollama quirks:
+
+- Ollama's `Done` flag is always `true` for `NumPredict = 1` requests — useless for stop detection.
+- Ollama suppresses special tokens in the `Response` field, returning an empty string for EOS.
+- Ollama's built-in temperature sampling doesn't always match the logprob distribution.
+
+**Stop detection** is based on whether the chosen token matches the `<|...|>` pattern (e.g., `<|endoftext|>`). When Ollama returns no logprobs at all (empty candidates), synthesize a `<|endoftext|>` entry so the frontend always shows why generation stopped.
+
+**SSE serialization**: The `/api/generate` endpoint manually serializes JSON via `JsonSerializer.Serialize(...)`. Unlike `Results.Ok()` (which auto-camelCases), manual serialization preserves PascalCase by default. You **must** pass `JsonSerializerOptions.Web` to get camelCase matching the frontend TypeScript interfaces.
 
 **Prerequisite:** Phase 1 is already implemented. The `/api/predict` endpoint and token prediction UI exist.
 
@@ -39,11 +47,12 @@ public class TokenPredictor(IOllamaApiClient client)
     /// This is the fundamental operation — everything else is built on this.
     /// </summary>
     public async Task<TokenPredictionResult> PredictNextAsync(
-        string prompt, int topN = 10, CancellationToken cancellationToken = default)
+        string prompt, int topN = 10, double temperature = 0,
+        CancellationToken cancellationToken = default)
     {
         var request = new GenerateRequest
         {
-            Model = "phi3",
+            Model = "phi4-mini",
             Prompt = prompt,
             Raw = true,
             Stream = false,
@@ -54,30 +63,54 @@ public class TokenPredictor(IOllamaApiClient client)
 
         GenerateResponseStream? lastResponse = null;
         await foreach (var response in client.GenerateAsync(request, cancellationToken))
-        {
             if (response is not null)
                 lastResponse = response;
-        }
 
         var candidates = ExtractCandidates(lastResponse);
-        var token = lastResponse?.Response ?? "";
 
-        // IMPORTANT: Ollama suppresses special tokens (like <|endoftext|>) in the
-        // Response field, returning "". When that happens, grab the actual token
-        // from the top logprob candidate so the frontend can display what the model
-        // really predicted.
-        if (string.IsNullOrEmpty(token) && candidates.Count > 0)
-            token = candidates[0].Token;
+        // When Ollama returns no logprobs (empty candidates), the model is signaling EOS.
+        // Synthesize an <|endoftext|> entry so the frontend always shows why generation stopped.
+        if (candidates.Count == 0)
+            candidates = [new TokenCandidate("<|endoftext|>", 0, 1.0)];
 
-        var isEos = string.IsNullOrEmpty(token.Trim()) || IsSpecialToken(token.Trim());
+        // We pick the token ourselves from the candidate list.
+        // Temperature=0 → greedy (always top candidate).
+        // Temperature>0 → re-weight logprobs and sample from the distribution.
+        var token = temperature > 0
+            ? SampleWithTemperature(candidates, temperature)
+            : candidates[0].Token;
+
+        var isEos = IsSpecialToken(token.Trim());
         return new TokenPredictionResult(
             token,
             candidates,
             isEos);
     }
 
+    private static string SampleWithTemperature(List<TokenCandidate> candidates, double temperature)
+    {
+        // Divide logprobs by temperature, then softmax to get adjusted probabilities
+        var scaled = candidates.Select(c => c.LogProbability / temperature).ToList();
+        var maxScaled = scaled.Max();
+        var exps = scaled.Select(s => Math.Exp(s - maxScaled)).ToList(); // subtract max for numerical stability
+        var sum = exps.Sum();
+        var probs = exps.Select(e => e / sum).ToList();
+
+        // Sample from the distribution
+        var roll = Random.Shared.NextDouble();
+        var cumulative = 0.0;
+        for (var i = 0; i < probs.Count; i++)
+        {
+            cumulative += probs[i];
+            if (roll <= cumulative)
+                return candidates[i].Token;
+        }
+
+        return candidates[^1].Token;
+    }
+
     private static bool IsSpecialToken(string token) =>
-        token.StartsWith('<') && token.EndsWith('>');
+        token.StartsWith("<|") && token.EndsWith("|>");
 
     private static List<TokenCandidate> ExtractCandidates(GenerateResponseStream? response)
     {
@@ -98,7 +131,7 @@ public class TokenPredictor(IOllamaApiClient client)
 
 #### Register the service
 
-Add after the existing `builder.AddOllamaApiClient("phi3")` line:
+Add after the existing `builder.AddOllamaApiClient("phi4-mini")` line (already in the baseline):
 
 ```csharp
 builder.Services.AddTransient<TokenPredictor>();
@@ -187,7 +220,7 @@ Add the following endpoint after `/api/predict`. It streams each step of the gen
 #### New Request Record
 
 ```csharp
-record GenerateStreamRequest(string Prompt, int MaxTokens = 200, int TopN = 5);
+record GenerateStreamRequest(string Prompt, int MaxTokens = 200, int TopN = 5, double Temperature = 0);
 ```
 
 #### Endpoint (Server-Sent Events)
@@ -209,14 +242,18 @@ api.MapPost("/generate", async (GenerateStreamRequest request, TokenPredictor pr
 
         // Same prediction call as Phase 1 — just in a loop now
         var result = await predictor.PredictNextAsync(
-            currentPrompt, request.TopN, context.RequestAborted);
+            currentPrompt, request.TopN, request.Temperature, context.RequestAborted);
 
+        // IMPORTANT: Must use JsonSerializerOptions.Web for camelCase output.
+        // Manual JsonSerializer.Serialize() preserves PascalCase by default,
+        // unlike Results.Ok() which auto-camelCases. Without this, the frontend
+        // gets "Token"/"Probability" instead of "token"/"probability".
         var payload = JsonSerializer.Serialize(new
         {
             token = result.Token,
             done = result.Done,
             candidates = result.Candidates
-        });
+        }, JsonSerializerOptions.Web);
 
         await context.Response.WriteAsync($"data: {payload}\n\n");
         await context.Response.Body.FlushAsync();
@@ -271,6 +308,7 @@ const [genPrompt, setGenPrompt] = useState("Once upon a time");
 const [generatedTokens, setGeneratedTokens] = useState<GeneratedToken[]>([]);
 const [isGenerating, setIsGenerating] = useState(false);
 const [selectedStep, setSelectedStep] = useState<number | null>(null);
+const [temperature, setTemperature] = useState(0);
 const abortRef = useRef<AbortController | null>(null);
 
 interface GeneratedToken {
@@ -294,7 +332,7 @@ const startGeneration = async () => {
     const response = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: genPrompt, maxTokens: 200, topN: 5 }),
+      body: JSON.stringify({ prompt: genPrompt, maxTokens: 200, topN: 5, temperature }),
       signal: controller.signal,
     });
 
@@ -341,10 +379,16 @@ const stopGeneration = () => {
 ```
 GenerationLoopView
 ├── PromptInput (textarea, ~3 rows)
+├── TemperatureControl (slider 0–2, step 0.1, with label showing value and hint text)
 ├── ButtonRow ("Generate" button + "Stop" button)
 ├── GeneratedText (the prompt + generated tokens displayed inline, each token is a clickable span)
 └── StepCandidates (when a token span is clicked, show its top candidates via CandidateList)
 ```
+
+**Temperature slider:**
+- Range 0–2, step 0.1, default 0
+- Label shows current value and a hint: 0 = "(greedy)", ≤0.5 = "(focused)", ≤1 = "(balanced)", >1 = "(creative)"
+- Disabled while generating
 
 **GeneratedText display:**
 - Show the original prompt in a muted/gray color
@@ -387,6 +431,7 @@ GenerationLoopView
 
 Add styles for the new elements to `App.css`:
 - Tab bar: horizontal flex, each tab is a clickable element, active tab has a bottom border or background highlight
+- Temperature control: label with flex layout, monospace value, muted hint text, full-width range slider with blue accent color, disabled state at 50% opacity
 - Generated text: displayed in a monospace block with `white-space: pre-wrap`
 - Token spans: inline, with a subtle hover effect and a highlighted state when selected
 - `.eos-token`: red text (`#ef4444`), light red background (`#fef2f2`), red border (`#fecaca`), smaller font size (`0.75rem`), bold, small pill shape with padding and border-radius. Hover darkens the background.
@@ -405,8 +450,12 @@ Extend (do not replace) the existing styles with new classes for the tab bar, ge
 3. Open the frontend — tab bar should show "Token Prediction" and "Generation Loop"
 4. "Token Prediction" tab works exactly as before (Phase 1 — autocomplete with click-to-insert)
 5. Switch to "Generation Loop" tab
-6. Default prompt "Once upon a time" is pre-filled
+6. Default prompt "Once upon a time" is pre-filled, temperature slider at 0.0 (greedy)
 7. Click "Generate" — tokens stream in one by one, building up text
-8. Click "Stop" mid-generation — streaming stops
-9. Click on any generated token — the step's top candidates appear below using the same CandidateList as Phase 1
-10. Verify `/api/generate` appears in Scalar API docs at `/scalar/v1`
+8. At temperature 0, running the same prompt twice produces identical output (greedy/deterministic)
+9. Click "Stop" mid-generation — streaming stops
+10. Click on any generated token — the step's top candidates appear below, with the chosen token highlighted
+11. The highlighted token should always be the #1 candidate when temperature is 0
+12. Generation ends with a visible `<|endoftext|>` red badge (not an empty/invisible stop)
+13. Slide temperature to 1.0, regenerate — output should vary between runs
+14. Verify `/api/generate` appears in Scalar API docs at `/scalar/v1`

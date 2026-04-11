@@ -2,7 +2,7 @@ using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.AddServiceDefaults();
-builder.AddOllamaApiClient("phi3");
+builder.AddOllamaApiClient("phi4-mini");
 builder.Services.AddProblemDetails();
 builder.Services.AddOpenApi();
 

@@ -29,7 +29,7 @@ api.MapPost("/predict", async (PredictRequest request, IOllamaApiClient client) 
 {
     var generateRequest = new GenerateRequest
     {
-        Model = "phi3",
+        Model = "phi4-mini",
         Prompt = request.Prompt,
         Raw = true,
         Stream = false,
@@ -72,7 +72,7 @@ using OllamaSharp;
 using OllamaSharp.Models;
 ```
 
-`IOllamaApiClient` is already registered via `builder.AddOllamaApiClient("phi3")`. No additional DI setup needed.
+`IOllamaApiClient` is already registered via `builder.AddOllamaApiClient("phi4-mini")`. No additional DI setup needed.
 
 ### Key OllamaSharp Types (reference)
 
@@ -218,7 +218,7 @@ Replace with minimal styles for the prediction UI. Keep it simple — the focus 
 ## Verification
 
 1. Run `dotnet build` — must succeed with zero errors
-2. Run `aspire start` — all resources (ollama, phi3, server, webfrontend) reach Running/Healthy
+2. Run `aspire start` — all resources (ollama, phi4-mini, server, webfrontend) reach Running/Healthy
 3. Open the frontend URL from the Aspire dashboard
 4. The default prompt "The capital of France is" should be pre-filled
 5. Candidate list should appear automatically (no button click needed)

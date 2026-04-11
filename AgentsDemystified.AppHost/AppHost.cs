@@ -3,11 +3,11 @@ var builder = DistributedApplication.CreateBuilder(args);
 var ollama = builder.AddOllama("ollama")
     .WithDataVolume();
 
-var phi3 = ollama.AddModel("phi3", "phi3");
+var phi4mini = ollama.AddModel("phi4-mini", "phi4-mini");
 
 var server = builder.AddProject<Projects.AgentsDemystified_Server>("server")
-    .WithReference(phi3)
-    .WaitFor(phi3)
+    .WithReference(phi4mini)
+    .WaitFor(phi4mini)
     .WithHttpHealthCheck("/health")
     .WithExternalHttpEndpoints();
 
