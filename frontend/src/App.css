@@ -147,6 +147,42 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Temperature control */
+.temperature-control {
+  margin-top: 0.75rem;
+}
+
+.temperature-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #374151;
+  margin-bottom: 0.25rem;
+}
+
+.temperature-value {
+  font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  font-weight: 600;
+  min-width: 2ch;
+}
+
+.temperature-hint {
+  color: #9ca3af;
+  font-size: 0.75rem;
+}
+
+.temperature-slider {
+  width: 100%;
+  cursor: pointer;
+  accent-color: #3b82f6;
+}
+
+.temperature-slider:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Button row */
 .button-row {
   display: flex;

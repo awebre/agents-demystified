@@ -43,14 +43,14 @@ api.MapPost("/generate", async (GenerateStreamRequest request, TokenPredictor pr
 
             // Same prediction call as Phase 1 — just in a loop now
             var result = await predictor.PredictNextAsync(
-                currentPrompt, request.TopN, context.RequestAborted);
+                currentPrompt, request.TopN, request.Temperature, context.RequestAborted);
 
             var payload = JsonSerializer.Serialize(new
             {
                 token = result.Token,
                 done = result.Done,
                 candidates = result.Candidates
-            });
+            }, JsonSerializerOptions.Web);
 
             await context.Response.WriteAsync($"data: {payload}\n\n");
             await context.Response.Body.FlushAsync();
@@ -72,4 +72,4 @@ internal record PredictRequest(string Prompt, int TopN = 10);
 
 internal record PredictResponse(string PredictedToken, List<TokenCandidate> Candidates);
 
-internal record GenerateStreamRequest(string Prompt, int MaxTokens = 200, int TopN = 5);
+internal record GenerateStreamRequest(string Prompt, int MaxTokens = 200, int TopN = 5, double Temperature = 0);

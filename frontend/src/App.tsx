@@ -131,6 +131,7 @@ function GenerationLoopView() {
   const [generatedTokens, setGeneratedTokens] = useState<GeneratedToken[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  const [temperature, setTemperature] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
   const startGeneration = async () => {
@@ -144,7 +145,7 @@ function GenerationLoopView() {
       const response = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: genPrompt, maxTokens: 200, topN: 5 }),
+        body: JSON.stringify({ prompt: genPrompt, maxTokens: 200, topN: 5, temperature }),
         signal: controller.signal,
       });
 
@@ -201,6 +202,25 @@ function GenerationLoopView() {
         placeholder="Enter a prompt to generate from..."
         disabled={isGenerating}
       />
+
+      <div className="temperature-control">
+        <label className="temperature-label">
+          Temperature: <span className="temperature-value">{temperature.toFixed(1)}</span>
+          <span className="temperature-hint">
+            {temperature === 0 ? "(greedy)" : temperature <= 0.5 ? "(focused)" : temperature <= 1 ? "(balanced)" : "(creative)"}
+          </span>
+        </label>
+        <input
+          type="range"
+          className="temperature-slider"
+          min="0"
+          max="2"
+          step="0.1"
+          value={temperature}
+          onChange={(e) => setTemperature(parseFloat(e.target.value))}
+          disabled={isGenerating}
+        />
+      </div>
 
       <div className="button-row">
         <button
