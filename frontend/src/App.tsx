@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import "./App.css";
 
 interface TokenCandidate {
@@ -12,6 +12,12 @@ interface PredictResponse {
   candidates: TokenCandidate[];
 }
 
+interface GeneratedToken {
+  token: string;
+  done: boolean;
+  candidates: TokenCandidate[];
+}
+
 function displayToken(token: string): string {
   return token
     .replace(/ /g, "\u2423")
@@ -20,7 +26,45 @@ function displayToken(token: string): string {
     .replace(/\r/g, "\u23CE");
 }
 
-function App() {
+function CandidateList({
+  candidates,
+  highlightToken,
+  onSelect,
+}: {
+  candidates: TokenCandidate[];
+  highlightToken?: string;
+  onSelect?: (token: string) => void;
+}) {
+  if (candidates.length === 0) return null;
+  const maxProb = candidates[0].probability;
+  return (
+    <ul className="candidate-list">
+      {candidates.map((candidate, index) => {
+        const barWidth = maxProb > 0 ? (candidate.probability / maxProb) * 100 : 0;
+        const isHighlighted = highlightToken
+          ? candidate.token === highlightToken
+          : index === 0;
+        return (
+          <li
+            key={index}
+            className={"candidate-row" + (isHighlighted ? " top-candidate" : "")}
+            onClick={() => onSelect?.(candidate.token)}
+          >
+            <span className="candidate-token">{displayToken(candidate.token)}</span>
+            <span className="candidate-bar-container">
+              <span className="candidate-bar" style={{ width: barWidth + "%" }} />
+            </span>
+            <span className="candidate-prob">
+              {(candidate.probability * 100).toFixed(1) + "%"}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function TokenPredictionView() {
   const [prompt, setPrompt] = useState("The capital of France is");
   const [result, setResult] = useState<PredictResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -56,56 +100,186 @@ function App() {
     };
   }, [prompt]);
 
-  const maxProbability =
-    result && result.candidates.length > 0
-      ? result.candidates[0].probability
-      : 1;
+  return (
+    <div className="view">
+      <textarea
+        className="prompt-input"
+        rows={3}
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        placeholder="Type a prompt..."
+      />
+
+      <div className="candidates">
+        {loading && !result && (
+          <div className="loading">Predicting...</div>
+        )}
+
+        {result && (
+          <CandidateList
+            candidates={result.candidates}
+            onSelect={(token) => setPrompt((prev) => prev + token)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GenerationLoopView() {
+  const [genPrompt, setGenPrompt] = useState("Once upon a time");
+  const [generatedTokens, setGeneratedTokens] = useState<GeneratedToken[]>([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [selectedStep, setSelectedStep] = useState<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const startGeneration = async () => {
+    setGeneratedTokens([]);
+    setSelectedStep(null);
+    setIsGenerating(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: genPrompt, maxTokens: 200, topN: 5 }),
+        signal: controller.signal,
+      });
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const json = line.slice(6);
+          if (!json) continue;
+          const event: GeneratedToken = JSON.parse(json);
+          setGeneratedTokens((prev) => [...prev, event]);
+          if (event.done) break;
+        }
+      }
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+    } finally {
+      setIsGenerating(false);
+      abortRef.current = null;
+    }
+  };
+
+  const stopGeneration = () => {
+    abortRef.current?.abort();
+  };
+
+  const selectedCandidates =
+    selectedStep !== null && generatedTokens[selectedStep]
+      ? generatedTokens[selectedStep].candidates
+      : [];
+
+  const selectedToken =
+    selectedStep !== null && generatedTokens[selectedStep]
+      ? generatedTokens[selectedStep].token
+      : undefined;
+
+  return (
+    <div className="view">
+      <textarea
+        className="prompt-input"
+        rows={3}
+        value={genPrompt}
+        onChange={(e) => setGenPrompt(e.target.value)}
+        placeholder="Enter a prompt to generate from..."
+        disabled={isGenerating}
+      />
+
+      <div className="button-row">
+        <button
+          className="generate-btn"
+          onClick={startGeneration}
+          disabled={isGenerating || !genPrompt.trim()}
+        >
+          Generate
+        </button>
+        {isGenerating && (
+          <button className="stop-btn" onClick={stopGeneration}>
+            Stop
+          </button>
+        )}
+      </div>
+
+      {(generatedTokens.length > 0 || isGenerating) && (
+        <div className="generated-text">
+          <span className="generated-prompt">{genPrompt}</span>
+          {generatedTokens.map((gt, index) => (
+            <span
+              key={index}
+              className={
+                "generated-token-span" +
+                (selectedStep === index ? " selected-token" : "") +
+                (gt.done ? " eos-token" : "")
+              }
+              onClick={() =>
+                setSelectedStep(selectedStep === index ? null : index)
+              }
+            >
+              {gt.done ? gt.token || "⏹" : gt.token}
+            </span>
+          ))}
+          {isGenerating && <span className="generating-cursor">|</span>}
+        </div>
+      )}
+
+      {selectedStep !== null && selectedCandidates.length > 0 && (
+        <div className="step-candidates">
+          <div className="step-candidates-header">
+            Step {selectedStep + 1} candidates
+          </div>
+          <CandidateList
+            candidates={selectedCandidates}
+            highlightToken={selectedToken}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function App() {
+  const [mode, setMode] = useState<"predict" | "generate">("predict");
 
   return (
     <div className="app">
       <header className="header">
-        <h1>Agents Demystified &mdash; Next Token Prediction</h1>
+        <h1>Agents Demystified</h1>
       </header>
 
+      <nav className="tab-bar">
+        <button
+          className={"tab" + (mode === "predict" ? " tab-active" : "")}
+          onClick={() => setMode("predict")}
+        >
+          Token Prediction
+        </button>
+        <button
+          className={"tab" + (mode === "generate" ? " tab-active" : "")}
+          onClick={() => setMode("generate")}
+        >
+          Generation Loop
+        </button>
+      </nav>
+
       <main className="main">
-        <textarea
-          className="prompt-input"
-          rows={3}
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Type a prompt..."
-        />
-
-        <div className="candidates">
-          {loading && !result && (
-            <div className="loading">Predicting...</div>
-          )}
-
-          {result &&
-            result.candidates.map((candidate, index) => (
-              <div
-                key={index}
-                className={`candidate-row ${index === 0 ? "top-candidate" : ""}`}
-                onClick={() => setPrompt((prev) => prev + candidate.token)}
-              >
-                <span className="candidate-token">
-                  {displayToken(candidate.token)}
-                </span>
-                <span className="candidate-prob">
-                  {(candidate.probability * 100).toFixed(1)}%
-                </span>
-                <div className="candidate-bar-bg">
-                  <div
-                    className="candidate-bar"
-                    style={{
-                      width:
-                        (candidate.probability / maxProbability) * 100 + "%",
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
-        </div>
+        {mode === "predict" ? <TokenPredictionView /> : <GenerationLoopView />}
       </main>
     </div>
   );
