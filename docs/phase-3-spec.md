@@ -300,11 +300,6 @@ Place the toggle button next to the "System Prompt" label, right-aligned.
             .filter((t) => !t.done)
             .map((t) => t.token)
             .join("")}
-          {streamingTokens.some((t) => t.done) && (
-            <span className="eos-token">
-              {streamingTokens.find((t) => t.done)?.token || "\u23F9"}
-            </span>
-          )}
         </p>
       </div>
     )}
