@@ -65,6 +65,43 @@ api.MapPost("/generate", async (GenerateStreamRequest request, TokenPredictor pr
     .WithName("GenerateStream")
     .WithDescription("Run token prediction in a loop, streaming each step — Phase 1 in a loop");
 
+api.MapPost("/chat", async (ChatRequest request, TokenPredictor predictor, HttpContext context) =>
+    {
+        context.Response.ContentType = "text/event-stream";
+        context.Response.Headers.CacheControl = "no-cache";
+        context.Response.Headers.Connection = "keep-alive";
+
+        // This is the entire "chat" logic — build a prompt string from messages
+        var prompt = ChatTemplateBuilder.BuildPrompt(request.SystemPrompt, request.Messages);
+
+        for (var i = 0; i < request.MaxTokens; i++)
+        {
+            context.RequestAborted.ThrowIfCancellationRequested();
+
+            // Same prediction call as Phase 2 — nothing new here
+            var result = await predictor.PredictNextAsync(
+                prompt, request.TopN, request.Temperature, context.RequestAborted);
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                type = "token",
+                token = result.Token,
+                done = result.Done,
+                candidates = result.Candidates
+            }, JsonSerializerOptions.Web);
+
+            await context.Response.WriteAsync($"data: {payload}\n\n");
+            await context.Response.Body.FlushAsync();
+
+            if (result.Done || string.IsNullOrEmpty(result.Token))
+                break;
+
+            prompt += result.Token;
+        }
+    })
+    .WithName("ChatStream")
+    .WithDescription("Chat with the model using structured messages — Phase 2's generation loop with a chat template");
+
 app.MapDefaultEndpoints();
 app.Run();
 
@@ -73,3 +110,12 @@ internal record PredictRequest(string Prompt, int TopN = 10);
 internal record PredictResponse(string PredictedToken, List<TokenCandidate> Candidates);
 
 internal record GenerateStreamRequest(string Prompt, int MaxTokens = 200, int TopN = 5, double Temperature = 0);
+
+public record ChatMessage(string Role, string Content);
+
+record ChatRequest(
+    string SystemPrompt,
+    List<ChatMessage> Messages,
+    int MaxTokens = 200,
+    int TopN = 5,
+    double Temperature = 0);
