@@ -77,11 +77,17 @@ public class ToolRegistry
             section += $"## {tool.Name}\n{tool.Description}\n";
             section += "Parameters: " + JsonSerializer.Serialize(tool.Parameters) + "\n\n";
         }
+        // This section is intentionally MECHANICAL ONLY — it teaches the model
+        // the tool-call SYNTAX and nothing about when or whether to use the
+        // tools. All behavior steering (when to call, search→read chaining, "you
+        // can read files") lives in the user-editable System Prompt. See the
+        // "Tool prompt vs system prompt" note below for why this split is a
+        // deliberate teaching beat.
         section += """
-            When you need to use a tool, output EXACTLY this format:
+            To call a tool, output EXACTLY this format on its own line and NOTHING else in that turn — no prose before or after:
             <tool_call>{"name": "tool_name", "arguments": {"param": "value"}}</tool_call>
 
-            Wait for the tool result before continuing your response. You may call multiple tools in sequence to answer a question.
+            Fill in every required argument with a concrete value; never emit empty arguments. After each tool call you will receive a <tool_result>...</tool_result> containing the output.
             """;
         return section;
     }
@@ -98,7 +104,23 @@ public class ToolRegistry
 
     private Task<string> SearchFiles(string query)
     {
-        var results = new List<string>();
+        // Broad, forgiving match: split the query into terms and match any file
+        // whose path or content contains ANY term, ranked by how many distinct
+        // terms it matches. This lets the model get away with sloppy natural-
+        // language queries (e.g. "ChatTemplateBuilder special tokens" still finds
+        // ChatTemplateBuilder.cs) instead of having to guess a single exact
+        // substring. See "Forgiving search" below for why we chose breadth.
+        var terms = query
+            .Split([' ', '\t', '\n', ',', '.', ':', ';', '"', '\'', '(', ')', '[', ']', '{', '}', '/', '\\'],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(t => t.ToLowerInvariant())
+            .Distinct()
+            .ToArray();
+
+        if (terms.Length == 0)
+            return Task.FromResult(JsonSerializer.Serialize(new { files = Array.Empty<string>() }));
+
+        var scored = new List<(string Path, int Score)>();
         var searchDir = new DirectoryInfo(projectRoot);
 
         foreach (var file in searchDir.EnumerateFiles("*", SearchOption.AllDirectories))
@@ -109,27 +131,26 @@ public class ToolRegistry
                 relativePath.Contains("/node_modules/") || relativePath.StartsWith("."))
                 continue;
 
-            // Match against file name
-            if (file.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
-            {
-                results.Add(relativePath);
-                continue;
-            }
-
-            // Match against file contents (small files only)
+            // Match against path + content (small files only); count distinct terms hit
+            var haystack = relativePath.ToLowerInvariant();
             if (file.Length < 100_000)
             {
-                try
-                {
-                    var content = File.ReadAllText(file.FullName);
-                    if (content.Contains(query, StringComparison.OrdinalIgnoreCase))
-                        results.Add(relativePath);
-                }
-                catch { /* skip unreadable files */ }
+                try { haystack += "\n" + File.ReadAllText(file.FullName).ToLowerInvariant(); }
+                catch { /* skip unreadable content, still match on path */ }
             }
+
+            var score = terms.Count(haystack.Contains);
+            if (score > 0)
+                scored.Add((relativePath, score));
         }
 
-        return Task.FromResult(JsonSerializer.Serialize(new { files = results.Take(10) }));
+        var files = scored
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Path)
+            .Select(x => x.Path)
+            .Take(10);
+
+        return Task.FromResult(JsonSerializer.Serialize(new { files }));
     }
 
     private Task<string> ReadFile(string path)
@@ -175,7 +196,7 @@ builder.Services.AddSingleton(new ToolRegistry(builder.Environment.ContentRootPa
 record AgentRequest(
     string SystemPrompt,
     List<ChatMessage> Messages,
-    int MaxTokens = 200,
+    int MaxTokens = 500,
     int TopN = 5,
     double Temperature = 0,
     int MaxToolCalls = 5);
@@ -238,6 +259,11 @@ api.MapPost("/agent", async (AgentRequest request, TokenPredictor predictor, Too
 
     var toolCallCount = 0;
 
+    // Guardrail: remember which tool calls we already ran this turn so we can
+    // short-circuit duplicates. See "Duplicate tool-call guardrail" below for
+    // why this is essential with a small local model.
+    var executedCalls = new HashSet<string>();
+
     // THE AGENT LOOP — generate, detect tool call, execute, inject result, repeat
     while (toolCallCount <= request.MaxToolCalls)
     {
@@ -284,6 +310,23 @@ api.MapPost("/agent", async (AgentRequest request, TokenPredictor predictor, Too
             name = toolCall.Name,
             arguments = toolCall.Arguments
         });
+
+        // Duplicate guardrail: if the model re-issued a call we already ran this
+        // turn, do NOT re-execute it — that re-injects the full result and bloats
+        // the prompt until an Ollama call times out and the stream dies. Feed
+        // back a short nudge instead so the model answers. (Counts toward the
+        // tool-call cap, so the loop still terminates.)
+        var callKey = $"{toolCall.Name}:{toolCall.Arguments.GetRawText()}";
+        if (!executedCalls.Add(callKey))
+        {
+            var nudge = JsonSerializer.Serialize(new
+            {
+                note = $"You already called {toolCall.Name} with these arguments and received the result above. Do not call it again — answer the user's question now using what you already have."
+            });
+            await StreamEvent(context, new { type = "tool_result", name = toolCall.Name, result = nudge });
+            prompt += $"\n<tool_result>{nudge}</tool_result>\n";
+            continue;
+        }
 
         // Execute the tool
         var toolResult = await tools.ExecuteAsync(toolCall.Name, toolCall.Arguments);
@@ -404,7 +447,7 @@ const sendMessage = async () => {
       body: JSON.stringify({
         systemPrompt,
         messages: updatedMessages,
-        maxTokens: 200,
+        maxTokens: 500,
         topN: 5,
         temperature,
       }),
@@ -681,6 +724,203 @@ Extend existing styles with new classes for tool cards, tools panel, and raw pro
 ---
 
 ## Important Notes
+
+### Debug Observability (add this from the start)
+
+The agent loop is opaque without instrumentation — when it "hangs" or "gives the wrong answer", you need to see the generated text, the parsed tool call JSON, and the tool result to know which of three things broke: (1) the model didn't emit a tool call, (2) the parser rejected what it emitted, (3) the tool threw on the arguments. Add tracing and structured logs from the start, not after you're already debugging.
+
+#### ActivitySource
+
+Add a named `ActivitySource` and register it with tracing so it flows to the Aspire dashboard:
+
+```csharp
+using System.Diagnostics;
+
+var agentActivitySource = new ActivitySource("AgentsDemystified.Server.Agent");
+
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing.AddSource("AgentsDemystified.Server.Agent"));
+```
+
+#### What to instrument
+
+Inside `/api/agent`:
+- **`agent.loop`** (parent span): message count, max tokens, max tool calls, temperature, **system prompt**, **last user message**, **full conversation** (`[role] content` per message). Logging the user message and conversation is what makes it possible to reconstruct an entire chat session from telemetry — without it, you can see what the model said but not what was asked.
+- **`agent.iteration`** (one per outer loop turn): iteration index, tokens generated, whether `</tool_call>` was hit, whether EOS was hit, the full generated text
+- **`agent.tool_call` log line**: parsed tool name + raw arguments JSON (or "no tool call parsed")
+- **`tool.execute`** (child span): tool name, arguments JSON, result length, result preview (first 500 chars)
+- **`agent.loop.done` log line**: total tool calls executed
+
+Concrete pattern for the loop span:
+
+```csharp
+using var loopActivity = agentActivitySource.StartActivity("agent.loop");
+loopActivity?.SetTag("agent.messages.count", request.Messages.Count);
+loopActivity?.SetTag("agent.max_tokens", request.MaxTokens);
+loopActivity?.SetTag("agent.max_tool_calls", request.MaxToolCalls);
+loopActivity?.SetTag("agent.temperature", request.Temperature);
+loopActivity?.SetTag("agent.system_prompt", request.SystemPrompt);
+var lastUserMessage = request.Messages.LastOrDefault(m => m.Role == "user")?.Content ?? "";
+loopActivity?.SetTag("agent.user_message", lastUserMessage);
+loopActivity?.SetTag("agent.conversation",
+    string.Join("\n", request.Messages.Select(m => $"[{m.Role}] {m.Content}")));
+```
+
+Use `ILogger<Program>` for the flat lines so they show up in `aspire otel logs server`. Use span tags for the structured data so they show in `aspire otel traces server` and the dashboard's trace view.
+
+#### How to inspect
+
+```bash
+# Structured logs (agent.loop.start, agent.iteration, agent.tool_call, tool.execute, agent.loop.done)
+aspire otel logs server --non-interactive | grep -E "agent\.|tool\."
+
+# Per-request trace list with span counts and durations
+aspire otel traces server --non-interactive
+
+# Unhandled exceptions (e.g. tool executor throwing on bad args)
+aspire otel logs server --non-interactive | grep -iE "exception|error|fail"
+
+# Raw SSE stream direct from the endpoint — confirms what the frontend actually receives
+curl -sN -X POST http://localhost:5192/api/agent \
+  -H "Content-Type: application/json" \
+  -d '{"systemPrompt":"...","messages":[{"role":"user","content":"..."}],"maxTokens":200,"topN":5,"temperature":0}' \
+  -o /tmp/agent-stream.log
+grep -E '"type":"(tool_call|tool_result|done)"' /tmp/agent-stream.log
+```
+
+If the agent "never responds" in the UI but traces show 200 OK with 90+ spans, the request is working — the UI is either waiting for slow generation or has a rendering bug. If you see a `tool_call` event with no matching `tool_result` event, the tool executor threw and killed the request mid-stream.
+
+### Tool Result Injection Format
+
+Do **not** inject the tool result inline inside the same assistant turn:
+
+```csharp
+// WRONG — model emits EOS immediately on the next iteration because the
+// assistant turn's "answer" (the tool_call) has already ended.
+prompt += $"\n<tool_result>{toolResult}</tool_result>\n";
+```
+
+Instead, close the assistant turn, open a new user turn carrying the tool result, then reopen the assistant turn — and **neutralize control tokens in the result content first** (see below):
+
+```csharp
+prompt +=
+    $"{ChatTemplateBuilder.EndToken}\n" +
+    $"{ChatTemplateBuilder.UserToken}\n<tool_result>{NeutralizeControlTokens(toolResult)}</tool_result>\n{ChatTemplateBuilder.EndToken}\n" +
+    $"{ChatTemplateBuilder.AssistantToken}\n";
+```
+
+This matches how chat-tuned models are trained: every assistant turn is bracketed by `<|end|>` and the next turn starts with `<|user|>` or similar. Without this, phi4-mini treats the `<tool_call>` as the completed answer and picks EOS on the next generation step.
+
+#### Neutralize control tokens in tool-result content
+
+A tool result can itself contain the framing tokens — a read file may include `<|end|>` / `<|assistant|>` / `<|user|>` (e.g. this project's chat-framing spec) or `<tool_call>…` tags (this very spec). Injected raw, the tokenizer treats those embedded tokens as **real turn boundaries or tool calls**: the conversation structure corrupts and the model derails — re-issuing tool calls, parroting the tags, never answering, and (because the flail bloats the prompt) eventually timing out the Ollama call and killing the stream.
+
+Defuse them before injection. Rewrite each control token to a look-alike that reads the same to a human but is inert to the tokenizer. Sanitize only the **prompt copy** — stream the verbatim result to the UI so the audience still sees true file contents:
+
+```csharp
+static string NeutralizeControlTokens(string content) => content
+    .Replace("<|system|>", "‹system›")
+    .Replace("<|user|>", "‹user›")
+    .Replace("<|assistant|>", "‹assistant›")
+    .Replace("<|end|>", "‹end›")
+    .Replace("<tool_call>", "‹tool_call›")
+    .Replace("</tool_call>", "‹/tool_call›")
+    .Replace("<tool_result>", "‹tool_result›")
+    .Replace("</tool_result>", "‹/tool_result›");
+```
+
+Apply it at every injection site (the normal tool result and the duplicate-guardrail nudge). This is also a mild prompt-injection defense: tool output can no longer forge framing tokens. It is what lets the agent read `phase-3-spec.md` (delimiter-heavy) and `phase-4-spec.md` (tool-call-heavy) and still produce a clean summary.
+
+### Tool Executor Error Handling
+
+The model will emit malformed arguments — empty objects (`"arguments": {}`), missing required parameters, the wrong shape. If `ExecuteAsync` throws, the SSE stream dies mid-flight (the `tool_call` event goes out but `tool_result` never does), and you'll see `An unhandled exception has occurred while executing the request` in the server logs with no stack trace context.
+
+Guard every argument access and wrap execution in try/catch so the agent loop can continue even when the model emits bad JSON:
+
+```csharp
+public async Task<string> ExecuteAsync(string name, JsonElement arguments)
+{
+    try
+    {
+        return name switch
+        {
+            "search_files" => await SearchFiles(GetStringArg(arguments, "query")),
+            "read_file"    => await ReadFile(GetStringArg(arguments, "path")),
+            _              => JsonSerializer.Serialize(new { error = $"Unknown tool: {name}" })
+        };
+    }
+    catch (Exception ex)
+    {
+        return JsonSerializer.Serialize(new { error = ex.Message });
+    }
+}
+
+private static string GetStringArg(JsonElement arguments, string name)
+{
+    if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty(name, out var prop))
+        throw new ArgumentException($"Missing required argument '{name}'");
+    return prop.ValueKind == JsonValueKind.String ? prop.GetString() ?? "" : prop.GetRawText().Trim('"');
+}
+```
+
+The error JSON flows back to the model as a `tool_result`, and the model often recovers by calling the tool again with corrected arguments — which is exactly the behavior you want to demo.
+
+### Tool prompt vs system prompt — a deliberate teaching split
+
+`GetToolPromptSection()` is intentionally MECHANICAL ONLY: it teaches the model the `<tool_call>` syntax and how results come back, nothing else. Everything about *when* and *whether* to use the tools — "you can read files," "search returns paths so chain to read," "stop once you can answer" — is **behavior steering** and belongs in the user-editable System Prompt, which is blank/generic by default ("You are a helpful assistant. Keep your responses brief.").
+
+This split is the phase's best live beat:
+
+1. **Fail first.** With the generic system prompt, ask *"Summarize the contents of the phase-4-spec file."* The model has the tools (visible in the raw view and the Tools panel) but no guidance, so it flails — typically it guesses `read_file` on a bad path (`"phase-4-spec"`, no directory, no extension), gets `File not found`, and gives up. The audience sees that **a tool is just a capability; the model still needs to be told how to behave.**
+2. **Fix live.** Paste behavior steering into the System Prompt — capability ("you CAN read files, never claim you can't"), the search→read chain, and a worked example — then re-ask and watch it improve. This demonstrates that the system prompt, not the tool wiring, is what steers the agent.
+
+**Why the steering must be the strong version.** Testing showed a one-line system prompt is not enough for phi4-mini at temperature 0 — it flails on query formulation and often never reaches the read step. The steering that reliably drives search→read→answer includes a **worked multi-step example** (search → tool_result → read_file → tool_result → answer). Keep that example in the pasted prompt; a terse "use your tools to read files" regresses.
+
+It must also **draw the search/read boundary explicitly.** Because `search_files` matches file *content* (not just names — see "Forgiving search" below), the model otherwise treats search as a content/read tool: it issues `search_files` with full file paths as the query, gets back a path list (never contents), and loops searching instead of reading. The cure is one sharp line in the system prompt: *"search_files returns ONLY a list of paths, never file contents — to see inside a file you MUST call read_file; never search for a full path."* A recommended steering block that reliably produces a clean search→read→answer:
+
+```
+You are a helpful assistant with tools to explore this project. You CAN read files — never claim you can't.
+
+IMPORTANT: search_files returns ONLY a list of file paths, never file contents. To see what is inside a file you MUST call read_file with its path. Never call search_files with a full file path — once you have a path, call read_file on it.
+
+To answer a question about the code:
+1. Call search_files with a short concrete term to locate the file.
+2. Call read_file on a path from the results to get its contents.
+3. Answer in plain text from those contents. Stop calling tools once you can answer.
+```
+
+### Instructive failure modes (keep them — don't engineer them away)
+
+This phase is more honest, and more memorable, *because* a small local model on dumb tools fails in visible ways. Leave these rough edges in:
+
+- **Refusal.** phi4-mini has a base-training prior to disclaim file access (*"I am unable to read files directly..."*). It calls `search_files` (matches "I can look things up") but balks at `read_file`. The system-prompt capability line is what overrides this — show the before/after.
+- **Forgiving search (chosen on purpose).** `search_files` tokenizes the query and matches any file whose path or content contains *any* term, ranked by term-match count. This is deliberately broad so the model's sloppy natural-language queries (e.g. `"ChatTemplateBuilder special tokens"`) still land a hit and the chain proceeds to `read_file` — rather than the model getting `{"files":[]}` from an exact-substring match and flailing. Two tradeoffs we accept: (a) broad matching returns more false positives, so the model has to pick the right path from the result list; (b) because search matches *content*, the model is tempted to use it as a read tool — issuing `search_files` with full file paths and looping on path lists instead of calling `read_file`. We do **not** narrow the tool to fix (b); instead the system-prompt steering draws the boundary explicitly ("search returns only paths — you MUST read_file for contents"). Keeping search broad but steering the behavior was the deliberate call.
+- **Flailing / repeated calls.** At temperature 0 the model often re-issues the same `read_file` or `search_files` instead of answering. Left unchecked this re-injects the full file contents each turn, bloating the prompt until a single Ollama `/api/generate` call exceeds the resilience-handler timeout and the SSE stream dies with no `done` event — the UI just hangs. The **duplicate tool-call guardrail** (below) is the one rough edge we DO smooth, because a hung stream isn't instructive, it's just broken.
+- **Control tokens in read files (fixed via neutralization).** The two big spec docs are adversarial input: `phase-3-spec.md` is full of chat-template delimiters (`<|end|>`, `<|assistant|>`, `<|user|>`) and `phase-4-spec.md` is full of `<tool_call>{...}</tool_call>` tags. Read raw into the prompt, those embedded tokens collide with the framing — the model breaks into fake turns or parrots the tags, flails to the `MaxToolCalls` cap, and the bloated prompt eventually times out the Ollama call and kills the stream. This is the one class we **fixed** (see *Neutralize control tokens in tool-result content* above): the injected copy has its control tokens defused, so reading either spec now yields a clean summary. Worth showing on stage as the payoff — "the agent can even read its own spec." (Earlier iterations demoed around this by reading only normal source files; with neutralization that workaround is no longer required.)
+
+Use telemetry to name the failure on stage: a prose refusal shows as `agent.iteration` with `tool_call_parsed=false`; flailing shows as repeated `agent.tool_call` lines with `duplicate=True`; a brittle-search miss shows as `tool.execute` with `result_preview={"files":[]}`. (Before neutralization, reading a delimiter-heavy doc showed up as `agent.iteration` text fragmenting into stray `<|end|>`/`<tool_call>` tokens — if you ever see that again, a tool result is reaching the prompt unsanitized.)
+
+### Duplicate tool-call guardrail
+
+The one failure mode worth smoothing: repeated identical tool calls bloating the prompt until Ollama times out and kills the stream. Track executed calls in a `HashSet<string>` keyed by `name + arguments`; on a repeat, skip `ExecuteAsync`, stream back a short nudge as the `tool_result` instead of the full content, and `continue`. The duplicate still counts toward `MaxToolCalls`, so the loop is guaranteed to terminate and emit `done`.
+
+```csharp
+var executedCalls = new HashSet<string>();
+// ...inside the loop, after streaming the tool_call event:
+var callKey = $"{toolCall.Name}:{toolCall.Arguments.GetRawText()}";
+if (!executedCalls.Add(callKey))
+{
+    var nudge = JsonSerializer.Serialize(new
+    {
+        note = $"You already called {toolCall.Name} with these arguments and received the result above. Do not call it again — answer the user's question now using what you already have."
+    });
+    await StreamEvent(context, new { type = "tool_result", name = toolCall.Name, result = nudge });
+    prompt += /* inject nudge as a new user turn, see Tool Result Injection Format */;
+    continue;
+}
+```
+
+This keeps context bounded so the stream always completes — the model may still flail to the `MaxToolCalls` cap, but the demo degrades gracefully instead of hanging.
 
 ### Tool Call Format Experimentation
 
