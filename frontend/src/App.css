@@ -328,9 +328,13 @@
 
 .system-prompt-header {
   display: flex;
-  justify-content: space-between;
+  gap: 0.5rem;
   align-items: center;
   margin-bottom: 0.25rem;
+}
+
+.system-prompt-header .system-prompt-label {
+  margin-right: auto;
 }
 
 .system-prompt-label {
@@ -373,6 +377,7 @@
   border-radius: 0.75rem;
   max-width: 80%;
   word-wrap: break-word;
+  flex-shrink: 0;
 }
 
 .chat-bubble-user {
@@ -510,4 +515,242 @@
   .raw-prompt-container {
     max-height: 40vh;
   }
+}
+
+/* Phase 4: Agent View */
+
+.tools-toggle {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid #f59e0b;
+  border-radius: 0.375rem;
+  background: white;
+  color: #92400e;
+  cursor: pointer;
+}
+
+.tools-toggle:hover {
+  background: #fffbeb;
+}
+
+.tools-panel {
+  border: 1px solid #e5e7eb;
+  border-radius: 0.375rem;
+  margin-top: 0.5rem;
+  overflow: hidden;
+}
+
+.tool-definition {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.tool-definition:last-child {
+  border-bottom: none;
+}
+
+.tool-def-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #1f2937;
+}
+
+.tool-def-description {
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-top: 0.125rem;
+}
+
+.tool-def-params {
+  margin-top: 0.25rem;
+}
+
+.tool-def-param {
+  font-size: 0.75rem;
+  color: #4b5563;
+}
+
+.tool-def-param code {
+  background: #f3f4f6;
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.2rem;
+  font-size: 0.75rem;
+}
+
+.tool-call-card {
+  margin: 0.5rem 0;
+  border: 1px solid #f59e0b;
+  border-left: 4px solid #f59e0b;
+  border-radius: 0.5rem;
+  background: #fffbeb;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.tool-call-incomplete {
+  border-color: #f97316;
+  border-style: dashed;
+  background: #fff7ed;
+}
+
+.tool-call-incomplete .tool-call-header {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.tool-call-header {
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.tool-call-summary {
+  flex: 1;
+  font-weight: 500;
+}
+
+.tool-call-target {
+  background: rgba(255, 255, 255, 0.6);
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  color: #78350f;
+}
+
+.tool-card-raw-toggle {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid currentColor;
+  border-radius: 0.25rem;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.tool-card-raw-toggle:hover {
+  opacity: 1;
+}
+
+.tool-result-body {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.85rem;
+  color: #115e59;
+}
+
+.tool-result-error {
+  border-color: #ef4444;
+  background: #fef2f2;
+}
+
+.tool-result-error .tool-result-header {
+  color: #7f1d1d;
+  background: #fee2e2;
+}
+
+.tool-result-error .tool-result-body {
+  color: #7f1d1d;
+}
+
+.tool-result-empty {
+  color: #6b7280;
+  font-style: italic;
+}
+
+.tool-result-files {
+  margin: 0;
+  padding: 0.5rem 0.75rem 0.5rem 1.75rem;
+  font-size: 0.8rem;
+  color: #115e59;
+}
+
+.tool-result-files li {
+  margin: 0.1rem 0;
+}
+
+.tool-result-files code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+}
+
+.tool-call-icon {
+  font-size: 1rem;
+}
+
+.tool-call-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.tool-call-args {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8rem;
+  background: transparent;
+  white-space: pre-wrap;
+  color: #78350f;
+}
+
+.tool-result-card {
+  margin: 0.5rem 0;
+  border: 1px solid #14b8a6;
+  border-left: 4px solid #14b8a6;
+  border-radius: 0.5rem;
+  background: #f0fdfa;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.tool-result-header {
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #134e4a;
+  background: #ccfbf1;
+}
+
+.tool-result-icon {
+  font-size: 1rem;
+}
+
+.tool-result-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.tool-result-content {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  background: transparent;
+  white-space: pre-wrap;
+  color: #115e59;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.raw-section-tool-call {
+  border-left-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.raw-section-tool-call .raw-section-label {
+  color: #f59e0b;
+}
+
+.raw-section-tool-result {
+  border-left-color: #14b8a6;
+  background: rgba(20, 184, 166, 0.08);
+}
+
+.raw-section-tool-result .raw-section-label {
+  color: #14b8a6;
 }
